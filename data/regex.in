@@ -1,4 +1,4 @@
 {
-    "pattern": "abc",
-    "input_string": "abc"
+    "pattern": "ab*c",
+    "input_string": "abbc"
 }
