@@ -49,6 +49,13 @@ fn regex_parser<F: ScalarField>(
         }
     }
 
+    // transition table:
+    // char | cur_state | next_state
+    // a    | 1         | 2
+    // b    | 2         | 3
+    // *    | 3         | 3
+    // c    | 3         | 4
+
     let accept = *transition_table.last().unwrap().last().unwrap();
 
     let next_states_vec = transition_table.iter().map(|row| Existing(row[2])).collect::<Vec<_>>();
@@ -58,6 +65,7 @@ fn regex_parser<F: ScalarField>(
         let mut res = vec![];
         for x in &possible_states {
             for token in &tokens {
+                // Pick the row in the transition table that has the same token and cur_state
                 let one_hot_vector = transition_table.iter().map(|row| {
                     let diff1 = gate.sub(ctx, row[0], *token);
                     let diff2 = gate.sub(ctx, row[1], *x);
@@ -65,12 +73,14 @@ fn regex_parser<F: ScalarField>(
                     let diff2_iszero = gate.is_zero(ctx, diff2);
                     gate.mul(ctx, diff1_iszero, diff2_iszero)
                 }).collect::<Vec<_>>();
+                // Get the next state in that row and push it into the possible_states in the next iteration
                 res.push(gate.inner_product(ctx, one_hot_vector.clone(), next_states_vec.clone()));
             }
         }
         std::mem::swap(&mut possible_states, &mut res);
     }
 
+    // Check if the final possible states contain the accept state
     let out_vec = possible_states.into_iter().map(|x| {
         let diff = gate.sub(ctx, x, accept);
         gate.is_zero(ctx, diff)
