@@ -116,23 +116,10 @@ fn regex_parser<F: ScalarField>(
         state = next_state;
     }
 
-    // for row in &transition_table {
-    //     println!("Row: ");
-    //     for x in row {
-    //         println!("entry : {:?}", x.value());
-    //     }
-    // }
-
-    // println!("accept: {:?}", accept.value());
-
     let next_states_vec = transition_table.iter().map(|row| Existing(row[2])).collect::<Vec<_>>();
     let initial_state = (0..MAX_PATTERN_LEN).map(|i| {
         if i == 1 { ctx.load_constant(F::from(1)) } else { ctx.load_zero() }
     }).collect::<Vec<_>>();
-
-    // for c in &initial_state {
-    //     println!("XDD: {:?}", c.value());
-    // }
 
     let mut possible_states = epsilon_closure(ctx, &gate, &transition_table, &next_states_vec, &initial_state);
 
@@ -146,8 +133,8 @@ fn regex_parser<F: ScalarField>(
         let character = input_string[i];
         for j in 0..MAX_PATTERN_LEN {
             let state_exists = possible_states[j];
-            let transition1 = lookup_transition(ctx, &gate, &transition_table, &next_states_vec, F::from(i as u64), Existing(character));
-            let transition2 = lookup_transition(ctx, &gate, &transition_table, &next_states_vec, F::from(i as u64), Constant(F::from('.' as u64)));
+            let transition1 = lookup_transition(ctx, &gate, &transition_table, &next_states_vec, F::from(j as u64), Existing(character));
+            let transition2 = lookup_transition(ctx, &gate, &transition_table, &next_states_vec, F::from(j as u64), Constant(F::from('.' as u64)));
             let to_add1 = gate.mul(ctx, transition1, state_exists);
             let to_add2 = gate.mul(ctx, transition2, state_exists);
             next_states = add_state(ctx, &gate, &next_states, &to_add1);
