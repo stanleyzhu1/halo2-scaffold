@@ -1,6 +1,6 @@
 {
-    "pattern": "ab*c00",
-    "input_string": "abbc00",
-    "pattern_len": 4,
-    "input_len": 4
+    "pattern": "a*.*b.a.*c*b*a*c*000",
+    "input_string": "abbabaaaaaaacaa00000",
+    "pattern_len": 17,
+    "input_len": 15
 }
