@@ -1,21 +1,74 @@
 use clap::Parser;
-use halo2_base::gates::{GateChip, GateInstructions};
-use halo2_base::utils::ScalarField;
+use halo2_base::gates::{GateChip, GateInstructions, RangeChip, RangeInstructions};
+use halo2_base::utils::{ScalarField};
 use halo2_base::AssignedValue;
+use halo2_base::QuantumCell;
 use halo2_base::{
     Context,
-    QuantumCell::{Constant, Existing},
+    QuantumCell::{Constant, Existing, Witness},
 };
 use halo2_scaffold::scaffold::cmd::Cli;
 use halo2_scaffold::scaffold::run;
 use serde::{Deserialize, Serialize};
-
+use std::env::var;
 use std::vec;
+
+const MAX_PATTERN_LEN: usize = 20;
+const MAX_INPUT_LEN: usize = 20;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CircuitInput {
     pub pattern: String,
     pub input_string: String,
+    pub pattern_len: u64,
+    pub input_len: u64,
+}
+
+fn add_state<F: ScalarField>(ctx: &mut Context<F>,
+    gate: &GateChip<F>,
+    states: &Vec<AssignedValue<F>>,
+    to_add: &AssignedValue<F>) -> Vec<AssignedValue<F>> {
+    let indicator = gate.idx_to_indicator(ctx, *to_add, MAX_PATTERN_LEN);
+    (0..MAX_PATTERN_LEN).map(|i| {
+        gate.or(ctx, states[i], indicator[i])
+    }).collect::<Vec<_>>()
+}
+
+fn lookup_transition<F: ScalarField>(ctx: &mut Context<F>,
+    gate: &GateChip<F>,
+    transition_table: &Vec<Vec<AssignedValue<F>>>,
+    next_states_vec: &Vec<QuantumCell<F>>,
+    state: F,
+    character: QuantumCell<F>) -> AssignedValue<F> {
+    let state = Witness(state);
+    let one_hot_vector = transition_table.iter().map(|row| {
+        let diff1 = gate.sub(ctx, row[0], character);
+        let diff2 = gate.sub(ctx, row[1], state);
+        let diff1_iszero = gate.is_zero(ctx, diff1);
+        let diff2_iszero = gate.is_zero(ctx, diff2);
+        gate.mul(ctx, diff1_iszero, diff2_iszero)
+    }).collect::<Vec<_>>();
+    gate.inner_product(ctx, one_hot_vector.clone(), next_states_vec.clone())
+}
+
+fn epsilon_closure<F: ScalarField>(ctx: &mut Context<F>,
+    gate: &GateChip<F>,
+    transition_table: &Vec<Vec<AssignedValue<F>>>,
+    next_states_vec: &Vec<QuantumCell<F>>,
+    states: &Vec<AssignedValue<F>>) -> Vec<AssignedValue<F>> {
+    let mut cur_states = states.clone();
+
+    for _ in 0..(MAX_PATTERN_LEN / 2) {
+        let mut next: Vec<AssignedValue<F>> = cur_states.clone();
+        for i in 1..MAX_PATTERN_LEN {
+            let state_exists = gate.is_zero(ctx, states[i]);
+            let index = lookup_transition(ctx, gate, transition_table, next_states_vec, F::from(i as u64), Constant(F::from('*' as u64)));
+            let to_add = gate.mul(ctx, index, state_exists);
+            next = add_state(ctx, &gate, &next, &to_add);
+        }
+        std::mem::swap(&mut cur_states, &mut next);
+    }
+    cur_states
 }
 
 fn regex_parser<F: ScalarField>(
@@ -30,62 +83,66 @@ fn regex_parser<F: ScalarField>(
         make_public.push(c);
     }
     let input_string = input_string.into_iter().map(|c| ctx.load_witness(c)).collect::<Vec<_>>();
+    let pattern_len = ctx.load_witness(F::from(input.pattern_len));
+    let input_len = ctx.load_witness(F::from(input.input_len));
 
     let gate = GateChip::<F>::default();
+    let lookup_bits =
+        var("LOOKUP_BITS").unwrap_or_else(|_| panic!("LOOKUP_BITS not set")).parse().unwrap();
+    let range = RangeChip::<F>::default(lookup_bits);
 
     let mut transition_table: Vec<Vec<AssignedValue<F>>> = Vec::new();
-
-    for c in pattern {
-        let is_equal = gate.is_equal(ctx, c, Constant(F::from('*' as u64)));
-        let inc = gate.sub(ctx, Constant(F::from(1)), is_equal);
-        if let Some(last_value) = transition_table.last() {
-            let last_state = *last_value.last().unwrap();
-            let next_state = gate.add(ctx, last_state, inc);
-            transition_table.push(vec![c, last_state, next_state]);
-        } else {
-            let initial_state = ctx.load_constant(F::from(1));
-            let next_state = gate.add(ctx, initial_state, inc);
-            transition_table.push(vec![c, initial_state, next_state]);
-        }
-    }
 
     // transition table:
     // char | cur_state | next_state
     // a    | 1         | 2
-    // b    | 2         | 3
-    // *    | 3         | 3
+    // b    | 2         | 2
+    // *    | 2         | 3
     // c    | 3         | 4
+
+    let mut state = ctx.load_constant(F::from(1));
+
+    for i in 0..(MAX_PATTERN_LEN - 1) {
+        let c = pattern[i];
+        let valid = range.is_less_than(ctx, Constant(F::from(i as u64)), pattern_len, 10);
+        state = gate.mul(ctx, state, valid);
+        let after = pattern[i+1];
+        let followed_by_asterisk = gate.is_equal(ctx, after, Constant(F::from('*' as u64)));
+        let inc = gate.sub(ctx, Constant(F::from(1)), followed_by_asterisk);
+        let next_state: AssignedValue<F> = gate.add(ctx, state, inc);
+        transition_table.push(vec![c, state, next_state]);
+        state = next_state;
+    }
 
     let accept = *transition_table.last().unwrap().last().unwrap();
 
     let next_states_vec = transition_table.iter().map(|row| Existing(row[2])).collect::<Vec<_>>();
-    let mut possible_states = vec![ctx.load_constant(F::from(1))];
-    for c in input_string {
-        let tokens = vec![Constant(F::from('*' as u64)), Constant(F::from('.' as u64)), Existing(c)];
-        let mut res = vec![];
-        for x in &possible_states {
-            for token in &tokens {
-                // Pick the row in the transition table that has the same token and cur_state
-                let one_hot_vector = transition_table.iter().map(|row| {
-                    let diff1 = gate.sub(ctx, row[0], *token);
-                    let diff2 = gate.sub(ctx, row[1], *x);
-                    let diff1_iszero = gate.is_zero(ctx, diff1);
-                    let diff2_iszero = gate.is_zero(ctx, diff2);
-                    gate.mul(ctx, diff1_iszero, diff2_iszero)
-                }).collect::<Vec<_>>();
-                // Get the next state in that row and push it into the possible_states in the next iteration
-                res.push(gate.inner_product(ctx, one_hot_vector.clone(), next_states_vec.clone()));
-            }
+    let initial_state = (0..MAX_PATTERN_LEN).map(|i| {
+        if i == 1 { ctx.load_constant(F::from(1)) } else { ctx.load_zero() }
+    }).collect::<Vec<_>>();
+    let mut possible_states = epsilon_closure(ctx, &gate, &transition_table, &next_states_vec, &initial_state);
+
+    for i in 0..MAX_INPUT_LEN {
+        let mut next_states = [(); MAX_PATTERN_LEN].map(|_| ctx.load_zero()).to_vec();
+        let valid = range.is_less_than(ctx, Constant(F::from(i as u64)), input_len, 10);
+        let character = input_string[i];
+        for j in 0..MAX_PATTERN_LEN {
+            let state_exists = possible_states[j];
+            let transition1 = lookup_transition(ctx, &gate, &transition_table, &next_states_vec, F::from(i as u64), Existing(character));
+            let transition2 = lookup_transition(ctx, &gate, &transition_table, &next_states_vec, F::from(i as u64), Constant(F::from('*' as u64)));
+            let to_add1 = gate.mul(ctx, transition1, state_exists);
+            let to_add2 = gate.mul(ctx, transition2, state_exists);
+            next_states = add_state(ctx, &gate, &next_states, &to_add1);
+            next_states = add_state(ctx, &gate, &next_states, &to_add2);
         }
-        std::mem::swap(&mut possible_states, &mut res);
+        next_states = epsilon_closure(ctx, &gate, &transition_table, &next_states_vec, &next_states);
+        possible_states = (0..MAX_PATTERN_LEN).into_iter().map(|k| {
+            gate.select(ctx, possible_states[k], next_states[k], valid)
+        }).collect::<Vec<_>>();
     }
 
     // Check if the final possible states contain the accept state
-    let out_vec = possible_states.into_iter().map(|x| {
-        let diff = gate.sub(ctx, x, accept);
-        gate.is_zero(ctx, diff)
-    }).collect::<Vec<_>>();
-    let out = gate.sum(ctx, out_vec);
+    let out = gate.select_from_idx(ctx, possible_states, accept);
     make_public.push(out);
 
     println!("val_assigned: {:?}", out.value());
