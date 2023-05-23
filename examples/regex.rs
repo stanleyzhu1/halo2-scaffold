@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 use std::env::var;
 use std::vec;
 
-const MAX_PATTERN_LEN: usize = 20;
-const MAX_INPUT_LEN: usize = 20;
+const MAX_PATTERN_LEN: usize = 6;
+const MAX_INPUT_LEN: usize = 6;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CircuitInput {
@@ -61,7 +61,7 @@ fn epsilon_closure<F: ScalarField>(ctx: &mut Context<F>,
     for _ in 0..(MAX_PATTERN_LEN / 2) {
         let mut next: Vec<AssignedValue<F>> = cur_states.clone();
         for i in 1..MAX_PATTERN_LEN {
-            let state_exists = gate.is_zero(ctx, states[i]);
+            let state_exists = gate.is_equal(ctx, states[i], Constant(F::from(1)));
             let index = lookup_transition(ctx, gate, transition_table, next_states_vec, F::from(i as u64), Constant(F::from('*' as u64)));
             let to_add = gate.mul(ctx, index, state_exists);
             next = add_state(ctx, &gate, &next, &to_add);
@@ -101,6 +101,7 @@ fn regex_parser<F: ScalarField>(
     // c    | 3         | 4
 
     let mut state = ctx.load_constant(F::from(1));
+    let mut accept = state;
 
     for i in 0..(MAX_PATTERN_LEN - 1) {
         let c = pattern[i];
@@ -111,16 +112,33 @@ fn regex_parser<F: ScalarField>(
         let inc = gate.sub(ctx, Constant(F::from(1)), followed_by_asterisk);
         let next_state: AssignedValue<F> = gate.add(ctx, state, inc);
         transition_table.push(vec![c, state, next_state]);
+        accept = gate.select(ctx, next_state, accept, valid);
         state = next_state;
     }
 
-    let accept = *transition_table.last().unwrap().last().unwrap();
+    // for row in &transition_table {
+    //     println!("Row: ");
+    //     for x in row {
+    //         println!("entry : {:?}", x.value());
+    //     }
+    // }
+
+    // println!("accept: {:?}", accept.value());
 
     let next_states_vec = transition_table.iter().map(|row| Existing(row[2])).collect::<Vec<_>>();
     let initial_state = (0..MAX_PATTERN_LEN).map(|i| {
         if i == 1 { ctx.load_constant(F::from(1)) } else { ctx.load_zero() }
     }).collect::<Vec<_>>();
+
+    // for c in &initial_state {
+    //     println!("XDD: {:?}", c.value());
+    // }
+
     let mut possible_states = epsilon_closure(ctx, &gate, &transition_table, &next_states_vec, &initial_state);
+
+    for c in &possible_states {
+        println!("XD: {:?}", c.value());
+    }
 
     for i in 0..MAX_INPUT_LEN {
         let mut next_states = [(); MAX_PATTERN_LEN].map(|_| ctx.load_zero()).to_vec();
@@ -129,7 +147,7 @@ fn regex_parser<F: ScalarField>(
         for j in 0..MAX_PATTERN_LEN {
             let state_exists = possible_states[j];
             let transition1 = lookup_transition(ctx, &gate, &transition_table, &next_states_vec, F::from(i as u64), Existing(character));
-            let transition2 = lookup_transition(ctx, &gate, &transition_table, &next_states_vec, F::from(i as u64), Constant(F::from('*' as u64)));
+            let transition2 = lookup_transition(ctx, &gate, &transition_table, &next_states_vec, F::from(i as u64), Constant(F::from('.' as u64)));
             let to_add1 = gate.mul(ctx, transition1, state_exists);
             let to_add2 = gate.mul(ctx, transition2, state_exists);
             next_states = add_state(ctx, &gate, &next_states, &to_add1);
@@ -137,8 +155,12 @@ fn regex_parser<F: ScalarField>(
         }
         next_states = epsilon_closure(ctx, &gate, &transition_table, &next_states_vec, &next_states);
         possible_states = (0..MAX_PATTERN_LEN).into_iter().map(|k| {
-            gate.select(ctx, possible_states[k], next_states[k], valid)
+            gate.select(ctx, next_states[k], possible_states[k], valid)
         }).collect::<Vec<_>>();
+        println!("Iteration {:?}", i);
+        for x in &possible_states {
+            println!("POS: {:?}", x.value());
+        }
     }
 
     // Check if the final possible states contain the accept state

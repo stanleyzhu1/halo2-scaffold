@@ -13,10 +13,7 @@ def regex(s, p):
     transition = {}
     state = 1
     for (i, c) in enumerate(p):
-        if c == '*':
-            transition['*', state] = state + 1
-            state += 1
-        elif i < len(p) - 1 and p[i+1] == '*':
+        if i < len(p) - 1 and p[i+1] == '*':
             transition[c, state] = state
         else:
             transition[c, state] = state + 1
