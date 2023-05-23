@@ -24,6 +24,7 @@ pub struct CircuitInput {
     pub input_len: u64,
 }
 
+// Addes the to_add state to the states bit vector
 fn add_state<F: ScalarField>(ctx: &mut Context<F>,
     gate: &GateChip<F>,
     states: &Vec<AssignedValue<F>>,
@@ -34,6 +35,9 @@ fn add_state<F: ScalarField>(ctx: &mut Context<F>,
     }).collect::<Vec<_>>()
 }
 
+
+// Look up the transition given the current state is state, and the current
+// character is character
 fn lookup_transition<F: ScalarField>(ctx: &mut Context<F>,
     gate: &GateChip<F>,
     transition_table: &Vec<Vec<AssignedValue<F>>>,
@@ -51,6 +55,8 @@ fn lookup_transition<F: ScalarField>(ctx: &mut Context<F>,
     gate.inner_product(ctx, one_hot_vector.clone(), next_states_vec.clone())
 }
 
+// Finds the epsilon closure of the states bit vector, i.e. the states that can
+// be reached via epsilon edges
 fn epsilon_closure<F: ScalarField>(ctx: &mut Context<F>,
     gate: &GateChip<F>,
     transition_table: &Vec<Vec<AssignedValue<F>>>,
@@ -100,6 +106,8 @@ fn regex_parser<F: ScalarField>(
     // *    | 2         | 3
     // c    | 3         | 4
 
+    // initial state is 1
+    // 0 is used as a failure state (not used in transitions)
     let mut state = ctx.load_constant(F::from(1));
     let mut accept = state;
 
@@ -107,11 +115,14 @@ fn regex_parser<F: ScalarField>(
         let c = pattern[i];
         let valid = range.is_less_than(ctx, Constant(F::from(i as u64)), pattern_len, 10);
         state = gate.mul(ctx, state, valid);
-        let after = pattern[i+1];
+        // check if the character is followed by an asterisk
+        let after = if i < MAX_PATTERN_LEN - 1 { pattern[i+1] } else { ctx.load_zero() };
         let followed_by_asterisk = gate.is_equal(ctx, after, Constant(F::from('*' as u64)));
+        // Increment the state if it's not followed by an asterisk
         let inc = gate.sub(ctx, Constant(F::from(1)), followed_by_asterisk);
         let next_state: AssignedValue<F> = gate.add(ctx, state, inc);
         transition_table.push(vec![c, state, next_state]);
+        // Only consider the valid part of the string
         accept = gate.select(ctx, next_state, accept, valid);
         state = next_state;
     }
@@ -123,16 +134,6 @@ fn regex_parser<F: ScalarField>(
 
     let mut possible_states = epsilon_closure(ctx, &gate, &transition_table, &next_states_vec, &initial_state);
 
-    // let test_state = (0..MAX_PATTERN_LEN).map(|i| {
-    //     if i == 6 { ctx.load_constant(F::from(1)) } else { ctx.load_zero() }
-    // }).collect::<Vec<_>>();
-
-    // let test_states = epsilon_closure(ctx, &gate, &transition_table, &next_states_vec, &test_state);
-
-    // for x in &test_states {
-    //     println!("test: {:?}", x.value());
-    // }
-
     for i in 0..MAX_INPUT_LEN {
         let mut next_states = [(); MAX_PATTERN_LEN].map(|_| ctx.load_zero()).to_vec();
         let valid = range.is_less_than(ctx, Constant(F::from(i as u64)), input_len, 10);
@@ -140,7 +141,9 @@ fn regex_parser<F: ScalarField>(
         for j in 0..MAX_PATTERN_LEN {
             let state_exists = possible_states[j];
             let transition1 = lookup_transition(ctx, &gate, &transition_table, &next_states_vec, F::from(j as u64), Existing(character));
+            // states that can be reached through a dot edge
             let transition2 = lookup_transition(ctx, &gate, &transition_table, &next_states_vec, F::from(j as u64), Constant(F::from('.' as u64)));
+            // only add the state if states_exists = 1
             let to_add1 = gate.mul(ctx, transition1, state_exists);
             let to_add2 = gate.mul(ctx, transition2, state_exists);
             next_states = add_state(ctx, &gate, &next_states, &to_add1);
@@ -150,10 +153,6 @@ fn regex_parser<F: ScalarField>(
         possible_states = (0..MAX_PATTERN_LEN).into_iter().map(|k| {
             gate.select(ctx, next_states[k], possible_states[k], valid)
         }).collect::<Vec<_>>();
-        // println!("Iteration {:?}", i);
-        // for x in &possible_states {
-        //     println!("POS: {:?}", x.value());
-        // }
     }
 
     // Check if the final possible states contain the accept state
