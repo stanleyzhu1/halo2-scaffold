@@ -1,0 +1,6 @@
+{
+    "pattern": "a*0",
+    "input_string": "aa0",
+    "pattern_len": 2,
+    "input_len": 2
+}
